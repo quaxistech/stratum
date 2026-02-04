@@ -9,5 +9,6 @@
   "payout_script_hex": "76a914000000000000000000000000000000000000000088ac",
   "extranonce1_size": 4,
   "extranonce2_size": 8,
-  "enable_auxpow": true
+  "enable_auxpow": true,
+  "protocol_version": 536870912
 }
