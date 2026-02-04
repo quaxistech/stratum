@@ -16,6 +16,47 @@
   в `mining.notify`.
 - Поддержка segwit: используется `default_witness_commitment` из шаблона блока.
 
+## Рекомендованные монеты для merged mining
+
+Ниже приведён список популярных сетей, которые чаще всего используются для merged
+mining с Bitcoin (ориентировочно отсортированы по значимости и доходности):
+
+1. **Fractal Bitcoin (FB)** — главный новичок 2025–2026, позиционируется как
+   решение для масштабирования Bitcoin.
+2. **Rootstock (RSK / RBTC)** — наиболее стабильный источник дополнительного
+   дохода. Награда выдаётся в RBTC (Smart Bitcoin), привязанном 1:1 к BTC.
+3. **Классическое «трио»**:
+   - **Syscoin (SYS)** — активно развивается и использует двухуровневую
+     архитектуру (NEVM).
+   - **Namecoin (NMC)** — первая сеть с merged mining, остаётся актуальной.
+   - **Elastos (ELA)** — проект «интернет-ОС», также майнится вместе с BTC.
+4. **Hathor (HTR)** — гибридная архитектура DAG + Blockchain, поддерживает
+   параллельный майнинг с Bitcoin.
+
+Список используется сервером в методе `mining.get_merged_mining_coins`. Его можно
+переопределить через параметр `merged_mining_coins` в конфиге.
+
+Для полноценного merged mining также задаётся список aux-цепочек в параметре
+`merged_mining_chains`. Для каждой цепочки указываются RPC-параметры и адрес
+кошелька, а сервер запрашивает `getauxblock` и передаёт данные майнерам в
+`mining.notify` (поле `aux_chains`). Посмотреть список цепочек без секретов можно
+через `mining.get_merged_mining_chains`. При отправке доли можно добавить массив
+auxpow в `mining.submit` как 6-й параметр:
+
+```json
+[
+  "worker",
+  "job_id",
+  "extranonce2",
+  "ntime",
+  "nonce",
+  [
+    {"name": "Namecoin", "auxpow": "<hex>"},
+    {"name": "Syscoin", "auxpow": "<hex>"}
+  ]
+]
+```
+
 ## Сборка
 
 Требования (Ubuntu 24.04):
@@ -48,7 +89,39 @@ cmake --build build -j
   "payout_address": "bc1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqp0a6f3",
   "extranonce1_size": 4,
   "extranonce2_size": 8,
-  "enable_auxpow": true
+  "enable_auxpow": true,
+  "merged_mining_coins": [
+    {
+      "rank": 1,
+      "name": "Fractal Bitcoin",
+      "ticker": "FB",
+      "description": "Главная новинка 2025–2026, позиционируется как решение для масштабирования Bitcoin."
+    },
+    {
+      "rank": 2,
+      "name": "Rootstock",
+      "ticker": "RSK/RBTC",
+      "description": "Наиболее стабильный источник дополнительного дохода; RBTC привязан 1:1 к BTC."
+    }
+  ],
+  "merged_mining_chains": [
+    {
+      "name": "Rootstock",
+      "ticker": "RSK",
+      "rpc_url": "http://127.0.0.1:4444",
+      "rpc_user": "rskrpc",
+      "rpc_password": "secret",
+      "payout_address": "1RootstockPayoutAddress..."
+    },
+    {
+      "name": "Namecoin",
+      "ticker": "NMC",
+      "rpc_url": "http://127.0.0.1:8336",
+      "rpc_user": "namecoinrpc",
+      "rpc_password": "secret",
+      "payout_address": "NNamecoinPayoutAddress..."
+    }
+  ]
 }
 ```
 
