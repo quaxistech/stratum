@@ -1,0 +1,13 @@
+{
+  "rpc_url": "http://127.0.0.1:8332",
+  "rpc_user": "bitcoinrpc",
+  "rpc_password": "secret",
+  "bind_address": "0.0.0.0",
+  "port": 3333,
+  "poll_interval_seconds": 5,
+  "default_difficulty": 32,
+  "payout_script_hex": "76a914000000000000000000000000000000000000000088ac",
+  "extranonce1_size": 4,
+  "extranonce2_size": 8,
+  "enable_auxpow": true
+}
