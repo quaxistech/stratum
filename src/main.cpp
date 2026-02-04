@@ -58,6 +58,8 @@ struct AuxChainConfig {
   std::optional<std::string> payout_address;
 };
 
+class AuxRpcClient;
+
 struct AuxChainState {
   AuxChainConfig config;
   std::unique_ptr<AuxRpcClient> rpc;
