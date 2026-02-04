@@ -41,12 +41,6 @@
       "name": "Elastos",
       "ticker": "ELA",
       "description": "Проект «интернет-ОС», также майнится вместе с BTC."
-    },
-    {
-      "rank": 6,
-      "name": "Hathor",
-      "ticker": "HTR",
-      "description": "Гибридная архитектура DAG + Blockchain, поддерживает параллельный майнинг с Bitcoin."
     }
   ],
   "merged_mining_chains": [
@@ -89,14 +83,6 @@
       "rpc_user": "elarpc",
       "rpc_password": "secret",
       "payout_address": "EElastosPayoutAddress..."
-    },
-    {
-      "name": "Hathor",
-      "ticker": "HTR",
-      "rpc_url": "http://127.0.0.1:8080",
-      "rpc_user": "htrrpc",
-      "rpc_password": "secret",
-      "payout_address": "HathorPayoutAddress..."
     }
   ]
 }
