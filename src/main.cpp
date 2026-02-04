@@ -41,6 +41,7 @@ struct Config {
   size_t extranonce1_size = 4;
   size_t extranonce2_size = 8;
   bool enable_auxpow = true;
+  uint32_t protocol_version = 0x20000000;
 };
 
 // Полный шаблон задания для майнеров Stratum.
@@ -397,7 +398,7 @@ class JobManager {
     JobTemplate job;
     job.job_id = std::to_string(++job_counter_);
     job.prevhash = hex_reverse(result["previousblockhash"].get<std::string>());
-    job.version = encode_little_endian(result["version"].get<uint32_t>(), 4);
+    job.version = encode_little_endian(config_.protocol_version, 4);
     job.nbits = result["bits"].get<std::string>();
     job.ntime = encode_little_endian(result["curtime"].get<uint32_t>(), 4);
     job.clean = true;
@@ -699,6 +700,7 @@ Config load_config(const std::string &path) {
   config.extranonce1_size = data.value("extranonce1_size", 4);
   config.extranonce2_size = data.value("extranonce2_size", 8);
   config.enable_auxpow = data.value("enable_auxpow", true);
+  config.protocol_version = data.value("protocol_version", 0x20000000);
   return config;
 }
 
