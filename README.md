@@ -45,14 +45,16 @@ cmake --build build -j
   "port": 3333,
   "poll_interval_seconds": 5,
   "default_difficulty": 32,
-  "payout_script_hex": "76a914000000000000000000000000000000000000000088ac",
+  "payout_address": "bc1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqp0a6f3",
   "extranonce1_size": 4,
   "extranonce2_size": 8,
   "enable_auxpow": true
 }
 ```
 
-`payout_script_hex` — это скрипт выплаты в формате hex (например, P2PKH/P2WPKH/P2SH).
+`payout_address` — адрес кошелька для награды (P2PKH/P2SH/Bech32). Сервер сам
+конвертирует его в scriptPubKey. Можно указать `payout_script_hex`, чтобы задать
+готовый скрипт выплаты вручную.
 
 ## Запуск
 
@@ -76,4 +78,3 @@ sudo systemctl enable --now stratum-server.service
 - Это упрощённая версия: нет учёта пользователей, выплат и статистики.
 - В production окружении важно ограничить доступ к RPC и Stratum по сети.
 - Для безопасности используйте отдельного пользователя и firewall.
-

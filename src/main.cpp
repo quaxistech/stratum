@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cctype>
 #include <cstdint>
 #include <fstream>
 #include <iomanip>
@@ -118,6 +119,195 @@ std::vector<uint8_t> sha256d(const std::vector<uint8_t> &data) {
   SHA256_Update(&ctx, hash.data(), hash.size());
   SHA256_Final(hash.data(), &ctx);
   return hash;
+}
+
+std::vector<uint8_t> base58_decode(const std::string &input) {
+  static const std::string kAlphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+  std::vector<uint8_t> out;
+  out.reserve(input.size());
+  for (char ch : input) {
+    auto pos = kAlphabet.find(ch);
+    if (pos == std::string::npos) {
+      throw std::runtime_error("Недопустимый символ Base58.");
+    }
+    int carry = static_cast<int>(pos);
+    for (size_t i = 0; i < out.size(); ++i) {
+      int value = static_cast<int>(out[i]) * 58 + carry;
+      out[i] = static_cast<uint8_t>(value & 0xff);
+      carry = value >> 8;
+    }
+    while (carry > 0) {
+      out.push_back(static_cast<uint8_t>(carry & 0xff));
+      carry >>= 8;
+    }
+  }
+  for (char ch : input) {
+    if (ch == '1') {
+      out.push_back(0);
+    } else {
+      break;
+    }
+  }
+  std::reverse(out.begin(), out.end());
+  return out;
+}
+
+std::vector<uint8_t> base58check_decode(const std::string &input) {
+  std::vector<uint8_t> data = base58_decode(input);
+  if (data.size() < 5) {
+    throw std::runtime_error("Base58Check слишком короткий.");
+  }
+  std::vector<uint8_t> payload(data.begin(), data.end() - 4);
+  std::vector<uint8_t> checksum(data.end() - 4, data.end());
+  auto hash = sha256d(payload);
+  if (!std::equal(checksum.begin(), checksum.end(), hash.begin())) {
+    throw std::runtime_error("Неверная контрольная сумма Base58Check.");
+  }
+  return payload;
+}
+
+uint32_t bech32_polymod(const std::vector<uint8_t> &values) {
+  uint32_t chk = 1;
+  for (uint8_t v : values) {
+    uint8_t top = chk >> 25;
+    chk = (chk & 0x1ffffff) << 5 ^ v;
+    if (top & 1) chk ^= 0x3b6a57b2;
+    if (top & 2) chk ^= 0x26508e6d;
+    if (top & 4) chk ^= 0x1ea119fa;
+    if (top & 8) chk ^= 0x3d4233dd;
+    if (top & 16) chk ^= 0x2a1462b3;
+  }
+  return chk;
+}
+
+std::vector<uint8_t> bech32_hrp_expand(const std::string &hrp) {
+  std::vector<uint8_t> out;
+  out.reserve(hrp.size() * 2 + 1);
+  for (char ch : hrp) {
+    out.push_back(static_cast<uint8_t>(ch >> 5));
+  }
+  out.push_back(0);
+  for (char ch : hrp) {
+    out.push_back(static_cast<uint8_t>(ch & 0x1f));
+  }
+  return out;
+}
+
+std::vector<uint8_t> convert_bits(const std::vector<uint8_t> &in, int from_bits, int to_bits, bool pad) {
+  int acc = 0;
+  int bits = 0;
+  int maxv = (1 << to_bits) - 1;
+  std::vector<uint8_t> out;
+  for (uint8_t value : in) {
+    if ((value >> from_bits) != 0) {
+      throw std::runtime_error("Некорректные данные при конвертации битов.");
+    }
+    acc = (acc << from_bits) | value;
+    bits += from_bits;
+    while (bits >= to_bits) {
+      bits -= to_bits;
+      out.push_back(static_cast<uint8_t>((acc >> bits) & maxv));
+    }
+  }
+  if (pad) {
+    if (bits > 0) {
+      out.push_back(static_cast<uint8_t>((acc << (to_bits - bits)) & maxv));
+    }
+  } else if (bits >= from_bits || ((acc << (to_bits - bits)) & maxv)) {
+    throw std::runtime_error("Некорректное заполнение при конвертации битов.");
+  }
+  return out;
+}
+
+struct Bech32DecodeResult {
+  std::string hrp;
+  std::vector<uint8_t> data;
+};
+
+Bech32DecodeResult bech32_decode(const std::string &address) {
+  static const std::string kCharset = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+  bool has_lower = false;
+  bool has_upper = false;
+  for (char ch : address) {
+    if (std::isalpha(static_cast<unsigned char>(ch))) {
+      if (std::islower(static_cast<unsigned char>(ch))) {
+        has_lower = true;
+      } else if (std::isupper(static_cast<unsigned char>(ch))) {
+        has_upper = true;
+      }
+    }
+  }
+  if (has_lower && has_upper) {
+    throw std::runtime_error("Bech32 адрес не должен смешивать регистры.");
+  }
+  std::string normalized = address;
+  std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                 [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+  auto pos = normalized.rfind('1');
+  if (pos == std::string::npos || pos < 1 || pos + 7 > normalized.size()) {
+    throw std::runtime_error("Неверный формат Bech32.");
+  }
+  std::string hrp = normalized.substr(0, pos);
+  std::vector<uint8_t> values;
+  values.reserve(normalized.size() - pos - 1);
+  for (size_t i = pos + 1; i < normalized.size(); ++i) {
+    char ch = normalized[i];
+    auto idx = kCharset.find(ch);
+    if (idx == std::string::npos) {
+      throw std::runtime_error("Недопустимый символ Bech32.");
+    }
+    values.push_back(static_cast<uint8_t>(idx));
+  }
+  std::vector<uint8_t> expanded = bech32_hrp_expand(hrp);
+  expanded.insert(expanded.end(), values.begin(), values.end());
+  if (bech32_polymod(expanded) != 1) {
+    throw std::runtime_error("Неверная контрольная сумма Bech32.");
+  }
+  if (values.size() < 6) {
+    throw std::runtime_error("Bech32 слишком короткий.");
+  }
+  std::vector<uint8_t> data(values.begin(), values.end() - 6);
+  return {hrp, data};
+}
+
+std::string script_from_address(const std::string &address) {
+  if (address.rfind("bc1", 0) == 0 || address.rfind("tb1", 0) == 0 || address.rfind("bcrt1", 0) == 0) {
+    Bech32DecodeResult decoded = bech32_decode(address);
+    if (decoded.data.empty()) {
+      throw std::runtime_error("Bech32 без версии witness.");
+    }
+    uint8_t version = decoded.data[0];
+    std::vector<uint8_t> program = convert_bits(
+        std::vector<uint8_t>(decoded.data.begin() + 1, decoded.data.end()), 5, 8, false);
+    if (version > 16) {
+      throw std::runtime_error("Неверная версия witness.");
+    }
+    std::vector<uint8_t> script;
+    script.push_back(version == 0 ? 0x00 : static_cast<uint8_t>(0x50 + version));
+    script.push_back(static_cast<uint8_t>(program.size()));
+    script.insert(script.end(), program.begin(), program.end());
+    return bytes_to_hex(script);
+  }
+  std::vector<uint8_t> payload = base58check_decode(address);
+  if (payload.size() != 21) {
+    throw std::runtime_error("Неверная длина Base58Check адреса.");
+  }
+  uint8_t version = payload[0];
+  std::vector<uint8_t> hash(payload.begin() + 1, payload.end());
+  if (version == 0x00 || version == 0x6f) { // P2PKH mainnet/testnet
+    std::vector<uint8_t> script = {0x76, 0xa9, 0x14};
+    script.insert(script.end(), hash.begin(), hash.end());
+    script.push_back(0x88);
+    script.push_back(0xac);
+    return bytes_to_hex(script);
+  }
+  if (version == 0x05 || version == 0xc4) { // P2SH mainnet/testnet
+    std::vector<uint8_t> script = {0xa9, 0x14};
+    script.insert(script.end(), hash.begin(), hash.end());
+    script.push_back(0x87);
+    return bytes_to_hex(script);
+  }
+  throw std::runtime_error("Неизвестная версия адреса Base58.");
 }
 
 std::string random_hex(size_t bytes) {
@@ -696,7 +886,13 @@ Config load_config(const std::string &path) {
   config.port = data.value("port", 3333);
   config.poll_interval_seconds = data.value("poll_interval_seconds", 5);
   config.default_difficulty = data.value("default_difficulty", 32);
-  config.payout_script_hex = data.at("payout_script_hex").get<std::string>();
+  if (data.contains("payout_script_hex")) {
+    config.payout_script_hex = data.at("payout_script_hex").get<std::string>();
+  } else if (data.contains("payout_address")) {
+    config.payout_script_hex = script_from_address(data.at("payout_address").get<std::string>());
+  } else {
+    throw std::runtime_error("Нужно указать payout_script_hex или payout_address.");
+  }
   config.extranonce1_size = data.value("extranonce1_size", 4);
   config.extranonce2_size = data.value("extranonce2_size", 8);
   config.enable_auxpow = data.value("enable_auxpow", true);
