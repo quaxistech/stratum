@@ -293,8 +293,11 @@ std::string target_from_difficulty(uint32_t difficulty) {
   std::vector<uint8_t> target(diff1_target_bytes, diff1_target_bytes + 32);
 
   uint64_t carry = 0;
-  for (int i = 31; i >= 0; --i) {
-    uint64_t value = (static_cast<uint64_t>(target[i]) << 8) + carry;
+  if (difficulty == 0) {
+    return bytes_to_hex(target);
+  }
+  for (size_t i = 0; i < target.size(); ++i) {
+    uint64_t value = carry * 256 + target[i];
     target[i] = static_cast<uint8_t>(value / difficulty);
     carry = value % difficulty;
   }
