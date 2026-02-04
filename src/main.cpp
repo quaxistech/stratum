@@ -798,9 +798,9 @@ class JobManager {
     return false;
   }
 
-  JobTemplate current_job() const {
+  std::optional<JobTemplate> current_job() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return current_job_.value();
+    return current_job_;
   }
 
   std::string extranonce1() const { return extranonce1_; }
@@ -976,18 +976,23 @@ class StratumSession : public std::enable_shared_from_this<StratumSession> {
     std::string nonce = params[4].get<std::string>();
 
     auto job = job_manager_.current_job();
-    if (job.job_id != job_id) {
+    if (!job) {
+      json response = {{"id", request["id"]}, {"result", false}, {"error", "Нет актуальной работы"}};
+      send_json(response);
+      return;
+    }
+    if (job->job_id != job_id) {
       json response = {{"id", request["id"]}, {"result", false}, {"error", "Неактуальная работа"}};
       send_json(response);
       return;
     }
 
-    std::string coinbase_tx = job.coinb1 + extranonce2 + job.coinb2;
+    std::string coinbase_tx = job->coinb1 + extranonce2 + job->coinb2;
     auto coinbase_hash = sha256d(hex_to_bytes(coinbase_tx));
     std::string coinbase_hash_hex = bytes_to_hex_rev(coinbase_hash);
-    std::string merkle_root = calculate_merkle_root(coinbase_hash_hex, job.merkle_branches);
+    std::string merkle_root = calculate_merkle_root(coinbase_hash_hex, job->merkle_branches);
 
-    std::string header_hex = job.version + job.prevhash + merkle_root + ntime + job.nbits + nonce;
+    std::string header_hex = job->version + job->prevhash + merkle_root + ntime + job->nbits + nonce;
     auto header_hash = sha256d(hex_to_bytes(header_hex));
     std::string header_hash_hex = bytes_to_hex_rev(header_hash);
 
@@ -1014,9 +1019,9 @@ class StratumSession : public std::enable_shared_from_this<StratumSession> {
       g_shares_rejected.fetch_add(1);
     }
 
-    if (accepted && hash_meets_target(header_hash_hex, job.target)) {
+    if (accepted && hash_meets_target(header_hash_hex, job->target)) {
       try {
-        std::string block_hex = build_block_hex(header_hex, coinbase_tx, job.transactions_hex);
+        std::string block_hex = build_block_hex(header_hex, coinbase_tx, job->transactions_hex);
         rpc_submit_block(block_hex);
         g_blocks_found.fetch_add(1);
         log_line("Найден блок! Отправлен в сеть.");
@@ -1037,24 +1042,28 @@ class StratumSession : public std::enable_shared_from_this<StratumSession> {
 
   // Отправка нового задания. При наличии auxpow добавляем aux-данные в конец параметров.
   void send_notify(bool clean) {
-    JobTemplate job = job_manager_.current_job();
-    job.clean = clean;
-
-    json params = json::array({job.job_id,
-                               job.prevhash,
-                               job.coinb1,
-                               job.coinb2,
-                               job.merkle_branches,
-                               job.version,
-                               job.nbits,
-                               job.ntime,
-                               job.clean});
-    json extra = json::object();
-    if (job.aux_data) {
-      extra["auxiliary"] = *job.aux_data;
+    auto job = job_manager_.current_job();
+    if (!job) {
+      log_line("Нет актуальной работы для отправки уведомления майнеру.");
+      return;
     }
-    if (job.aux_chains_data) {
-      extra["aux_chains"] = *job.aux_chains_data;
+    job->clean = clean;
+
+    json params = json::array({job->job_id,
+                               job->prevhash,
+                               job->coinb1,
+                               job->coinb2,
+                               job->merkle_branches,
+                               job->version,
+                               job->nbits,
+                               job->ntime,
+                               job->clean});
+    json extra = json::object();
+    if (job->aux_data) {
+      extra["auxiliary"] = *job->aux_data;
+    }
+    if (job->aux_chains_data) {
+      extra["aux_chains"] = *job->aux_chains_data;
     }
     if (!extra.empty()) {
       params.push_back(extra);
@@ -1187,7 +1196,11 @@ int main(int argc, char **argv) {
     RpcClient rpc(config);
     JobManager job_manager(config, rpc);
 
-    job_manager.update();
+    try {
+      job_manager.update();
+    } catch (const std::exception &ex) {
+      log_line(std::string("Ошибка первичного обновления шаблона: ") + ex.what());
+    }
 
     std::thread poller([&]() {
       auto last_stats_log = std::chrono::steady_clock::now();
