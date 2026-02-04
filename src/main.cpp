@@ -1,7 +1,7 @@
 #include <boost/asio.hpp>
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
-#include <openssl/sha.h>
+#include <openssl/evp.h>
 
 #include <algorithm>
 #include <atomic>
@@ -161,16 +161,27 @@ json default_merged_mining_coins() {
 }
 
 // Двойной SHA256 для расчёта хэшей блоков/транзакций.
-std::vector<uint8_t> sha256d(const std::vector<uint8_t> &data) {
-  std::vector<uint8_t> hash(SHA256_DIGEST_LENGTH);
-  SHA256_CTX ctx;
-  SHA256_Init(&ctx);
-  SHA256_Update(&ctx, data.data(), data.size());
-  SHA256_Final(hash.data(), &ctx);
-  SHA256_Init(&ctx);
-  SHA256_Update(&ctx, hash.data(), hash.size());
-  SHA256_Final(hash.data(), &ctx);
+std::vector<uint8_t> sha256(const std::vector<uint8_t> &data) {
+  std::vector<uint8_t> hash(static_cast<size_t>(EVP_MD_get_size(EVP_sha256())));
+  unsigned int hash_len = 0;
+  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+  if (!ctx) {
+    throw std::runtime_error("Не удалось создать контекст SHA256.");
+  }
+  if (EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr) != 1 ||
+      EVP_DigestUpdate(ctx, data.data(), data.size()) != 1 ||
+      EVP_DigestFinal_ex(ctx, hash.data(), &hash_len) != 1) {
+    EVP_MD_CTX_free(ctx);
+    throw std::runtime_error("Ошибка вычисления SHA256.");
+  }
+  EVP_MD_CTX_free(ctx);
+  hash.resize(hash_len);
   return hash;
+}
+
+std::vector<uint8_t> sha256d(const std::vector<uint8_t> &data) {
+  auto first = sha256(data);
+  return sha256(first);
 }
 
 std::vector<uint8_t> base58_decode(const std::string &input) {
