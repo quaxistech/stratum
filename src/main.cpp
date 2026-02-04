@@ -157,11 +157,7 @@ json default_merged_mining_coins() {
        json{{"rank", 5},
             {"name", "Elastos"},
             {"ticker", "ELA"},
-            {"description", "Проект «интернет-ОС», также майнится вместе с BTC."}},
-       json{{"rank", 6},
-            {"name", "Hathor"},
-            {"ticker", "HTR"},
-            {"description", "Гибридная архитектура DAG + Blockchain, поддерживает параллельный майнинг с Bitcoin."}}});
+            {"description", "Проект «интернет-ОС», также майнится вместе с BTC."}}});
 }
 
 // Двойной SHA256 для расчёта хэшей блоков/транзакций.
