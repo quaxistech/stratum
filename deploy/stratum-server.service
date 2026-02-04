@@ -1,0 +1,15 @@
+[Unit]
+Description=Stratum Server for Bitcoin Core
+After=network.target
+
+[Service]
+Type=simple
+User=stratum
+WorkingDirectory=/opt/stratum
+ExecStart=/opt/stratum/stratum_server /opt/stratum/config.json
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
