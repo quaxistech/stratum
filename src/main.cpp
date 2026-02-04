@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <random>
@@ -43,6 +44,25 @@ struct Config {
   size_t extranonce2_size = 8;
   bool enable_auxpow = true;
   uint32_t protocol_version = 0x20000000;
+  json merged_mining_coins;
+  std::vector<struct AuxChainConfig> merged_mining_chains;
+};
+
+struct AuxChainConfig {
+  std::string name;
+  std::string ticker;
+  std::string rpc_url;
+  std::string rpc_user;
+  std::string rpc_password;
+  std::string payout_script_hex;
+  std::optional<std::string> payout_address;
+};
+
+struct AuxChainState {
+  AuxChainConfig config;
+  std::unique_ptr<AuxRpcClient> rpc;
+  std::string hash;
+  std::string target;
 };
 
 // Полный шаблон задания для майнеров Stratum.
@@ -59,6 +79,7 @@ struct JobTemplate {
   std::string target;
   std::vector<std::string> transactions_hex;
   std::optional<json> aux_data;
+  std::optional<json> aux_chains_data;
 };
 
 // Состояние отдельной сессии майнера.
@@ -70,6 +91,11 @@ struct MinerSessionState {
 };
 
 std::atomic<bool> g_running{true};
+std::atomic<uint64_t> g_shares_accepted{0};
+std::atomic<uint64_t> g_shares_rejected{0};
+std::atomic<uint64_t> g_blocks_found{0};
+std::atomic<uint64_t> g_auxpow_submitted{0};
+std::atomic<uint64_t> g_auxpow_accepted{0};
 
 void log_line(const std::string &message) {
   auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
@@ -106,6 +132,34 @@ std::string bytes_to_hex_rev(const std::vector<uint8_t> &data) {
     oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(*it);
   }
   return oss.str();
+}
+
+json default_merged_mining_coins() {
+  return json::array(
+      {json{{"rank", 1},
+            {"name", "Fractal Bitcoin"},
+            {"ticker", "FB"},
+            {"description", "Главная новинка 2025–2026, позиционируется как решение для масштабирования Bitcoin."}},
+       json{{"rank", 2},
+            {"name", "Rootstock"},
+            {"ticker", "RSK/RBTC"},
+            {"description", "Наиболее стабильный источник дополнительного дохода; RBTC привязан 1:1 к BTC."}},
+       json{{"rank", 3},
+            {"name", "Syscoin"},
+            {"ticker", "SYS"},
+            {"description", "Активно развивается, использует двухуровневую архитектуру (NEVM)."}},
+       json{{"rank", 4},
+            {"name", "Namecoin"},
+            {"ticker", "NMC"},
+            {"description", "Первая сеть с merged mining, остаётся актуальной."}},
+       json{{"rank", 5},
+            {"name", "Elastos"},
+            {"ticker", "ELA"},
+            {"description", "Проект «интернет-ОС», также майнится вместе с BTC."}},
+       json{{"rank", 6},
+            {"name", "Hathor"},
+            {"ticker", "HTR"},
+            {"description", "Гибридная архитектура DAG + Blockchain, поддерживает параллельный майнинг с Bitcoin."}}});
 }
 
 // Двойной SHA256 для расчёта хэшей блоков/транзакций.
@@ -520,16 +574,33 @@ size_t curl_write_callback(char *ptr, size_t size, size_t nmemb, void *userdata)
   return size * nmemb;
 }
 
+class CurlGlobalGuard {
+ public:
+  CurlGlobalGuard() {
+    if (++ref_count_ == 1) {
+      curl_global_init(CURL_GLOBAL_DEFAULT);
+    }
+  }
+
+  ~CurlGlobalGuard() {
+    if (--ref_count_ == 0) {
+      curl_global_cleanup();
+    }
+  }
+
+ private:
+  static std::atomic<int> ref_count_;
+};
+
+std::atomic<int> CurlGlobalGuard::ref_count_{0};
+
 // RPC-клиент для работы с Bitcoin Core через JSON-RPC.
 class RpcClient {
  public:
-  explicit RpcClient(const Config &config) : config_(config) {
-    curl_global_init(CURL_GLOBAL_DEFAULT);
-  }
-
-  ~RpcClient() { curl_global_cleanup(); }
+  explicit RpcClient(const Config &config) : config_(config) {}
 
   json call(const std::string &method, const json &params) {
+    CurlGlobalGuard guard;
     CURL *curl = curl_easy_init();
     if (!curl) {
       throw std::runtime_error("Не удалось инициализировать CURL");
@@ -568,12 +639,66 @@ class RpcClient {
   Config config_;
 };
 
+// RPC-клиент для aux-цепочек merged mining.
+class AuxRpcClient {
+ public:
+  AuxRpcClient(std::string url, std::string user, std::string password)
+      : rpc_url_(std::move(url)), rpc_user_(std::move(user)), rpc_password_(std::move(password)) {}
+
+  json call(const std::string &method, const json &params) {
+    CurlGlobalGuard guard;
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+      throw std::runtime_error("Не удалось инициализировать CURL");
+    }
+
+    std::string response;
+    std::string payload = json{{"jsonrpc", "1.0"}, {"id", "stratum"}, {"method", method}, {"params", params}}.dump();
+
+    struct curl_slist *headers = nullptr;
+    headers = curl_slist_append(headers, "content-type: application/json");
+
+    curl_easy_setopt(curl, CURLOPT_URL, rpc_url_.c_str());
+    curl_easy_setopt(curl, CURLOPT_USERNAME, rpc_user_.c_str());
+    curl_easy_setopt(curl, CURLOPT_PASSWORD, rpc_password_.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+
+    CURLcode res = curl_easy_perform(curl);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    if (res != CURLE_OK) {
+      throw std::runtime_error(std::string("Ошибка RPC: ") + curl_easy_strerror(res));
+    }
+
+    auto parsed = json::parse(response);
+    if (!parsed["error"].is_null()) {
+      throw std::runtime_error("RPC ошибка: " + parsed["error"].dump());
+    }
+    return parsed["result"];
+  }
+
+ private:
+  std::string rpc_url_;
+  std::string rpc_user_;
+  std::string rpc_password_;
+};
+
 // Менеджер шаблонов работы (job). Обновляет данные из getblocktemplate.
 class JobManager {
  public:
   JobManager(const Config &config, RpcClient &rpc)
       : config_(config), rpc_(rpc) {
     extranonce1_ = random_hex(config_.extranonce1_size);
+    for (const auto &chain : config_.merged_mining_chains) {
+      AuxChainState state;
+      state.config = chain;
+      state.rpc = std::make_unique<AuxRpcClient>(chain.rpc_url, chain.rpc_user, chain.rpc_password);
+      aux_chains_.push_back(std::move(state));
+    }
   }
 
   void update() {
@@ -635,8 +760,44 @@ class JobManager {
       job.aux_data = result["auxiliary"];
     }
 
+    update_aux_chains();
+    json aux_payload = build_aux_chains_payload();
+    if (!aux_payload.empty()) {
+      job.aux_chains_data = aux_payload;
+    }
+
     std::lock_guard<std::mutex> lock(mutex_);
     current_job_ = job;
+  }
+
+  bool submit_auxpow(const std::string &chain_id, const std::string &auxpow_hex) {
+    g_auxpow_submitted.fetch_add(1);
+    for (auto &chain : aux_chains_) {
+      if (chain.config.name == chain_id || chain.config.ticker == chain_id) {
+        if (chain.hash.empty()) {
+          return false;
+        }
+        try {
+          json params = json::array({chain.hash, auxpow_hex});
+          auto result = chain.rpc->call("getauxblock", params);
+          if (result.is_boolean()) {
+            bool accepted = result.get<bool>();
+            if (accepted) {
+              g_auxpow_accepted.fetch_add(1);
+              log_line("Auxpow принят для chain " + chain.config.name);
+            }
+            return accepted;
+          }
+          g_auxpow_accepted.fetch_add(1);
+          log_line("Auxpow принят для chain " + chain.config.name);
+          return true;
+        } catch (const std::exception &ex) {
+          log_line("Ошибка submit auxpow для " + chain.config.name + ": " + ex.what());
+          return false;
+        }
+      }
+    }
+    return false;
   }
 
   JobTemplate current_job() const {
@@ -647,8 +808,39 @@ class JobManager {
   std::string extranonce1() const { return extranonce1_; }
 
  private:
+  void update_aux_chains() {
+    for (auto &chain : aux_chains_) {
+      try {
+        auto result = chain.rpc->call("getauxblock", json::array());
+        if (result.contains("hash")) {
+          chain.hash = result["hash"].get<std::string>();
+        }
+        if (result.contains("target")) {
+          chain.target = result["target"].get<std::string>();
+        }
+      } catch (const std::exception &ex) {
+        log_line("Ошибка обновления aux chain " + chain.config.name + ": " + ex.what());
+      }
+    }
+  }
+
+  json build_aux_chains_payload() const {
+    json payload = json::array();
+    for (const auto &chain : aux_chains_) {
+      if (chain.hash.empty() || chain.target.empty()) {
+        continue;
+      }
+      payload.push_back({{"name", chain.config.name},
+                         {"ticker", chain.config.ticker},
+                         {"hash", chain.hash},
+                         {"target", chain.target}});
+    }
+    return payload;
+  }
+
   Config config_;
   RpcClient &rpc_;
+  std::vector<AuxChainState> aux_chains_;
   std::string extranonce1_;
   mutable std::mutex mutex_;
   std::optional<JobTemplate> current_job_;
@@ -713,6 +905,10 @@ class StratumSession : public std::enable_shared_from_this<StratumSession> {
       handle_authorize(request);
     } else if (method == "mining.submit") {
       handle_submit(request);
+    } else if (method == "mining.get_merged_mining_coins") {
+      handle_get_merged_mining_coins(request);
+    } else if (method == "mining.get_merged_mining_chains") {
+      handle_get_merged_mining_chains(request);
     } else {
       json response = {{"id", request["id"]}, {"result", nullptr}, {"error", "Неизвестный метод"}};
       send_json(response);
@@ -738,6 +934,26 @@ class StratumSession : public std::enable_shared_from_this<StratumSession> {
   void handle_authorize(const json &request) {
     state_.authorized = true;
     json response = {{"id", request["id"]}, {"result", true}, {"error", nullptr}};
+    send_json(response);
+  }
+
+  // mining.get_merged_mining_coins: возвращаем список монет для merged mining.
+  void handle_get_merged_mining_coins(const json &request) {
+    json response = {{"id", request["id"]}, {"result", config_.merged_mining_coins}, {"error", nullptr}};
+    send_json(response);
+  }
+
+  // mining.get_merged_mining_chains: возвращаем параметры aux-цепочек без секретов.
+  void handle_get_merged_mining_chains(const json &request) {
+    json chains = json::array();
+    for (const auto &chain : config_.merged_mining_chains) {
+      json entry = {{"name", chain.name}, {"ticker", chain.ticker}, {"payout_script_hex", chain.payout_script_hex}};
+      if (chain.payout_address) {
+        entry["payout_address"] = *chain.payout_address;
+      }
+      chains.push_back(entry);
+    }
+    json response = {{"id", request["id"]}, {"result", chains}, {"error", nullptr}};
     send_json(response);
   }
 
@@ -780,10 +996,31 @@ class StratumSession : public std::enable_shared_from_this<StratumSession> {
     std::string share_target = target_from_difficulty(state_.difficulty);
     bool accepted = hash_meets_target(header_hash_hex, share_target);
 
+    if (params.size() > 5 && params[5].is_array()) {
+      for (const auto &item : params[5]) {
+        if (!item.contains("name") || !item.contains("auxpow")) {
+          continue;
+        }
+        std::string chain_id = item["name"].get<std::string>();
+        std::string auxpow = item["auxpow"].get<std::string>();
+        bool submitted = job_manager_.submit_auxpow(chain_id, auxpow);
+        if (!submitted) {
+          log_line("Auxpow не принят для chain " + chain_id);
+        }
+      }
+    }
+
+    if (accepted) {
+      g_shares_accepted.fetch_add(1);
+    } else {
+      g_shares_rejected.fetch_add(1);
+    }
+
     if (accepted && hash_meets_target(header_hash_hex, job.target)) {
       try {
         std::string block_hex = build_block_hex(header_hex, coinbase_tx, job.transactions_hex);
         rpc_submit_block(block_hex);
+        g_blocks_found.fetch_add(1);
         log_line("Найден блок! Отправлен в сеть.");
       } catch (const std::exception &ex) {
         log_line(std::string("Ошибка submitblock: ") + ex.what());
@@ -814,8 +1051,15 @@ class StratumSession : public std::enable_shared_from_this<StratumSession> {
                                job.nbits,
                                job.ntime,
                                job.clean});
+    json extra = json::object();
     if (job.aux_data) {
-      params.push_back(*job.aux_data);
+      extra["auxiliary"] = *job.aux_data;
+    }
+    if (job.aux_chains_data) {
+      extra["aux_chains"] = *job.aux_chains_data;
+    }
+    if (!extra.empty()) {
+      params.push_back(extra);
     }
     json notification = {{"id", nullptr}, {"method", "mining.notify"}, {"params", params}};
     send_json(notification);
@@ -897,6 +1141,30 @@ Config load_config(const std::string &path) {
   config.extranonce2_size = data.value("extranonce2_size", 8);
   config.enable_auxpow = data.value("enable_auxpow", true);
   config.protocol_version = data.value("protocol_version", 0x20000000);
+  if (data.contains("merged_mining_coins")) {
+    config.merged_mining_coins = data.at("merged_mining_coins");
+  } else {
+    config.merged_mining_coins = default_merged_mining_coins();
+  }
+  if (data.contains("merged_mining_chains")) {
+    for (const auto &entry : data.at("merged_mining_chains")) {
+      AuxChainConfig chain;
+      chain.name = entry.at("name").get<std::string>();
+      chain.ticker = entry.at("ticker").get<std::string>();
+      chain.rpc_url = entry.at("rpc_url").get<std::string>();
+      chain.rpc_user = entry.at("rpc_user").get<std::string>();
+      chain.rpc_password = entry.at("rpc_password").get<std::string>();
+      if (entry.contains("payout_script_hex")) {
+        chain.payout_script_hex = entry.at("payout_script_hex").get<std::string>();
+      } else if (entry.contains("payout_address")) {
+        chain.payout_address = entry.at("payout_address").get<std::string>();
+        chain.payout_script_hex = script_from_address(*chain.payout_address);
+      } else {
+        throw std::runtime_error("Нужно указать payout_script_hex или payout_address для merged_mining_chains.");
+      }
+      config.merged_mining_chains.push_back(std::move(chain));
+    }
+  }
   return config;
 }
 
@@ -924,11 +1192,21 @@ int main(int argc, char **argv) {
     job_manager.update();
 
     std::thread poller([&]() {
+      auto last_stats_log = std::chrono::steady_clock::now();
       while (g_running) {
         try {
           job_manager.update();
         } catch (const std::exception &ex) {
           log_line(std::string("Ошибка обновления шаблона: ") + ex.what());
+        }
+        auto now = std::chrono::steady_clock::now();
+        if (now - last_stats_log >= std::chrono::seconds(30)) {
+          last_stats_log = now;
+          log_line("Статистика: shares accepted=" + std::to_string(g_shares_accepted.load()) +
+                   ", rejected=" + std::to_string(g_shares_rejected.load()) +
+                   ", blocks found=" + std::to_string(g_blocks_found.load()) +
+                   ", auxpow submitted=" + std::to_string(g_auxpow_submitted.load()) +
+                   ", auxpow accepted=" + std::to_string(g_auxpow_accepted.load()));
         }
         std::this_thread::sleep_for(std::chrono::seconds(config.poll_interval_seconds));
       }

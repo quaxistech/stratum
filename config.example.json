@@ -10,5 +10,93 @@
   "extranonce1_size": 4,
   "extranonce2_size": 8,
   "enable_auxpow": true,
-  "protocol_version": 536870912
+  "protocol_version": 536870912,
+  "merged_mining_coins": [
+    {
+      "rank": 1,
+      "name": "Fractal Bitcoin",
+      "ticker": "FB",
+      "description": "Главная новинка 2025–2026, позиционируется как решение для масштабирования Bitcoin."
+    },
+    {
+      "rank": 2,
+      "name": "Rootstock",
+      "ticker": "RSK/RBTC",
+      "description": "Наиболее стабильный источник дополнительного дохода; RBTC привязан 1:1 к BTC."
+    },
+    {
+      "rank": 3,
+      "name": "Syscoin",
+      "ticker": "SYS",
+      "description": "Активно развивается, использует двухуровневую архитектуру (NEVM)."
+    },
+    {
+      "rank": 4,
+      "name": "Namecoin",
+      "ticker": "NMC",
+      "description": "Первая сеть с merged mining, остаётся актуальной."
+    },
+    {
+      "rank": 5,
+      "name": "Elastos",
+      "ticker": "ELA",
+      "description": "Проект «интернет-ОС», также майнится вместе с BTC."
+    },
+    {
+      "rank": 6,
+      "name": "Hathor",
+      "ticker": "HTR",
+      "description": "Гибридная архитектура DAG + Blockchain, поддерживает параллельный майнинг с Bitcoin."
+    }
+  ],
+  "merged_mining_chains": [
+    {
+      "name": "Fractal Bitcoin",
+      "ticker": "FB",
+      "rpc_url": "http://127.0.0.1:18443",
+      "rpc_user": "fbrpc",
+      "rpc_password": "secret",
+      "payout_address": "1FractalPayoutAddress..."
+    },
+    {
+      "name": "Rootstock",
+      "ticker": "RSK",
+      "rpc_url": "http://127.0.0.1:4444",
+      "rpc_user": "rskrpc",
+      "rpc_password": "secret",
+      "payout_address": "1RootstockPayoutAddress..."
+    },
+    {
+      "name": "Syscoin",
+      "ticker": "SYS",
+      "rpc_url": "http://127.0.0.1:8369",
+      "rpc_user": "sysrpc",
+      "rpc_password": "secret",
+      "payout_address": "1SyscoinPayoutAddress..."
+    },
+    {
+      "name": "Namecoin",
+      "ticker": "NMC",
+      "rpc_url": "http://127.0.0.1:8336",
+      "rpc_user": "namecoinrpc",
+      "rpc_password": "secret",
+      "payout_address": "NNamecoinPayoutAddress..."
+    },
+    {
+      "name": "Elastos",
+      "ticker": "ELA",
+      "rpc_url": "http://127.0.0.1:20336",
+      "rpc_user": "elarpc",
+      "rpc_password": "secret",
+      "payout_address": "EElastosPayoutAddress..."
+    },
+    {
+      "name": "Hathor",
+      "ticker": "HTR",
+      "rpc_url": "http://127.0.0.1:8080",
+      "rpc_user": "htrrpc",
+      "rpc_password": "secret",
+      "payout_address": "HathorPayoutAddress..."
+    }
+  ]
 }
