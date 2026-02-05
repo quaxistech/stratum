@@ -1,4 +1,5 @@
 #include <boost/asio.hpp>
+#include <boost/multiprecision/cpp_int.hpp>
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
@@ -24,6 +25,7 @@
 
 using json = nlohmann::json;
 using boost::asio::ip::tcp;
+using boost::multiprecision::cpp_int;
 
 namespace {
 
@@ -115,16 +117,39 @@ void log_line(const std::string &message) {
 }
 
 std::vector<uint8_t> hex_to_bytes(const std::string &hex) {
+  auto hex_value = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+    return -1;
+  };
+
   std::vector<uint8_t> out;
   if (hex.size() % 2 != 0) {
     return out;
   }
   out.reserve(hex.size() / 2);
   for (size_t i = 0; i < hex.size(); i += 2) {
-    uint8_t byte = static_cast<uint8_t>(std::stoul(hex.substr(i, 2), nullptr, 16));
+    int hi = hex_value(hex[i]);
+    int lo = hex_value(hex[i + 1]);
+    if (hi < 0 || lo < 0) {
+      return {};
+    }
+    uint8_t byte = static_cast<uint8_t>((hi << 4) | lo);
     out.push_back(byte);
   }
   return out;
+}
+
+bool is_hex_string(const std::string &hex) {
+  return std::all_of(hex.begin(), hex.end(), [](unsigned char c) { return std::isxdigit(c) != 0; });
+}
+
+std::string to_lower_hex(std::string hex) {
+  std::transform(hex.begin(), hex.end(), hex.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return hex;
 }
 
 std::string bytes_to_hex(const std::vector<uint8_t> &data) {
@@ -444,6 +469,22 @@ std::string encode_little_endian(uint64_t value, size_t bytes) {
 
 }
 
+std::string encode_big_endian_32(uint32_t value) {
+  std::vector<uint8_t> out(4);
+  out[0] = static_cast<uint8_t>((value >> 24) & 0xff);
+  out[1] = static_cast<uint8_t>((value >> 16) & 0xff);
+  out[2] = static_cast<uint8_t>((value >> 8) & 0xff);
+  out[3] = static_cast<uint8_t>(value & 0xff);
+  return bytes_to_hex(out);
+}
+
+std::optional<uint32_t> parse_u32_hex(const std::string &hex) {
+  if (hex.size() != 8 || !is_hex_string(hex)) {
+    return std::nullopt;
+  }
+  return static_cast<uint32_t>(std::stoul(hex, nullptr, 16));
+}
+
 uint32_t decode_little_endian(const std::string &hex) {
   auto bytes = hex_to_bytes(hex);
   uint32_t res = 0;
@@ -478,6 +519,9 @@ std::string build_coinbase_hex(uint32_t height,
   while (tmp > 0) {
     height_bytes.push_back(static_cast<char>(tmp & 0xff));
     tmp >>= 8;
+  }
+  if (height_bytes.empty()) {
+    height_bytes.push_back(0);
   }
   std::string height_push = bytes_to_hex(std::vector<uint8_t>(height_bytes.begin(), height_bytes.end()));
   std::string height_prefix = bytes_to_hex({static_cast<uint8_t>(height_bytes.size())});
@@ -558,25 +602,42 @@ std::string calculate_merkle_root(const std::string &coinbase_hash_hex,
 
 // Получение цели из nBits (как в заголовке блока).
 std::string target_from_nbits(const std::string &nbits_hex) {
-  if (nbits_hex.size() != 8) {
+  auto nbits_opt = parse_u32_hex(nbits_hex);
+  if (!nbits_opt) {
     return std::string(64, '0');
   }
-  uint32_t nbits = std::stoul(nbits_hex, nullptr, 16);
+  uint32_t nbits = *nbits_opt;
   uint32_t exponent = nbits >> 24;
   uint32_t mantissa = nbits & 0x007fffff;
-  std::vector<uint8_t> target(32, 0);
-  size_t offset = exponent > 3 ? exponent - 3 : 0;
-  if (offset + 3 <= target.size()) {
-    target[offset] = static_cast<uint8_t>((mantissa >> 16) & 0xff);
-    target[offset + 1] = static_cast<uint8_t>((mantissa >> 8) & 0xff);
-    target[offset + 2] = static_cast<uint8_t>(mantissa & 0xff);
+  if (mantissa == 0) {
+    return std::string(64, '0');
   }
-  std::reverse(target.begin(), target.end());
-  return bytes_to_hex(target);
+
+  cpp_int target = mantissa;
+  if (exponent <= 3) {
+    target >>= (8 * (3 - exponent));
+  } else {
+    target <<= (8 * (exponent - 3));
+  }
+
+  cpp_int max_target = (cpp_int(1) << 256) - 1;
+  if (target < 0 || target > max_target) {
+    return std::string(64, 'f');
+  }
+
+  std::vector<uint8_t> out(32, 0);
+  for (int i = 31; i >= 0; --i) {
+    out[static_cast<size_t>(i)] = static_cast<uint8_t>(target & 0xff);
+    target >>= 8;
+  }
+  return bytes_to_hex(out);
 }
 
 // Пересчёт цели для доли (share) из сложности.
 std::string target_from_difficulty(uint32_t difficulty) {
+  if (difficulty == 0) {
+    return std::string(64, 'f');
+  }
   const uint8_t diff1_target_bytes[32] = {
       0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0x00, 0x00,
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -584,11 +645,11 @@ std::string target_from_difficulty(uint32_t difficulty) {
       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
   std::vector<uint8_t> target(diff1_target_bytes, diff1_target_bytes + 32);
 
-  uint64_t carry = 0;
-  for (int i = 31; i >= 0; --i) {
-    uint64_t value = (static_cast<uint64_t>(target[i]) << 8) + carry;
+  uint64_t remainder = 0;
+  for (size_t i = 0; i < target.size(); ++i) {
+    uint64_t value = remainder * 256 + target[i];
     target[i] = static_cast<uint8_t>(value / difficulty);
-    carry = value % difficulty;
+    remainder = value % difficulty;
   }
   return bytes_to_hex(target);
 }
@@ -760,7 +821,8 @@ class JobManager {
     JobTemplate job;
     job.job_id = std::to_string(++job_counter_);
     job.prevhash = hex_reverse(result["previousblockhash"].get<std::string>());
-    job.version = encode_little_endian(config_.protocol_version, 4);
+    uint32_t template_version = result.value("version", config_.protocol_version);
+    job.version = encode_little_endian(template_version, 4);
     job.nbits = result["bits"].get<std::string>();
     job.ntime = encode_little_endian(result["curtime"].get<uint32_t>(), 4);
     job.clean = true;
@@ -785,7 +847,11 @@ class JobManager {
         result["coinbasevalue"].get<uint64_t>(),
         witness_commitment);
 
-    size_t extranonce_pos = coinbase_tx.find(extranonce1_) + extranonce1_.size();
+    size_t marker_pos = coinbase_tx.find(extranonce1_);
+    if (marker_pos == std::string::npos) {
+      throw std::runtime_error("Не найден extranonce1 в собранной coinbase");
+    }
+    size_t extranonce_pos = marker_pos + extranonce1_.size();
     job.coinb1 = coinbase_tx.substr(0, extranonce_pos);
     job.coinb2 = coinbase_tx.substr(extranonce_pos + config_.extranonce2_size * 2);
 
@@ -906,6 +972,22 @@ class StratumSession : public std::enable_shared_from_this<StratumSession> {
   }
 
  private:
+  bool validate_submit_hex_field(const json &request,
+                                 const std::string &name,
+                                 const std::string &value,
+                                 size_t required_len) {
+    if (value.size() != required_len || !is_hex_string(value)) {
+      build_submit_error(request, name + " имеет неверный hex-формат");
+      return false;
+    }
+    return true;
+  }
+
+  void build_submit_error(const json &request, const std::string &message) {
+    json response = {{"id", request["id"]}, {"result", false}, {"error", message}};
+    send_json(response);
+  }
+
   void do_read() {
     auto self = shared_from_this();
     boost::asio::async_read_until(socket_, buffer_, '\n',
@@ -1019,14 +1101,11 @@ class StratumSession : public std::enable_shared_from_this<StratumSession> {
              mask_hex = options["version-rolling.mask"].get<std::string>();
            }
            // Парсим маску
-           try {
-             state_.version_rolling_mask = std::stoul(mask_hex, nullptr, 16);
-           } catch (...) {
-             state_.version_rolling_mask = 0xffffffff;
-           }
+           auto mask_opt = parse_u32_hex(mask_hex);
+           state_.version_rolling_mask = mask_opt.value_or(0xffffffffu);
            
            result["version-rolling"] = true;
-           result["version-rolling.mask"] = mask_hex; 
+           result["version-rolling.mask"] = encode_big_endian_32(state_.version_rolling_mask);
            log_line("Включен version-rolling для майнера. Маска: " + mask_hex);
          } else if (ext == "minimum-difficulty") {
              result["minimum-difficulty"] = false;
@@ -1096,17 +1175,29 @@ class StratumSession : public std::enable_shared_from_this<StratumSession> {
       return;
     }
 
+    if (!request.contains("params") || !request["params"].is_array()) {
+      build_submit_error(request, "params должны быть массивом");
+      return;
+    }
     auto params = request["params"];
     if (params.size() < 5) {
-      json response = {{"id", request["id"]}, {"result", false}, {"error", "Недостаточно параметров"}};
-      send_json(response);
+      build_submit_error(request, "Недостаточно параметров");
+      return;
+    }
+    if (!params[1].is_string() || !params[2].is_string() || !params[3].is_string() || !params[4].is_string()) {
+      build_submit_error(request, "Некорректные типы полей в submit");
       return;
     }
 
     std::string job_id = params[1].get<std::string>();
-    std::string extranonce2 = params[2].get<std::string>();
-    std::string ntime = params[3].get<std::string>();
-    std::string nonce = params[4].get<std::string>();
+    std::string extranonce2 = to_lower_hex(params[2].get<std::string>());
+    std::string ntime = to_lower_hex(params[3].get<std::string>());
+    std::string nonce = to_lower_hex(params[4].get<std::string>());
+    if (!validate_submit_hex_field(request, "extranonce2", extranonce2, config_.extranonce2_size * 2) ||
+        !validate_submit_hex_field(request, "ntime", ntime, 8) ||
+        !validate_submit_hex_field(request, "nonce", nonce, 8)) {
+      return;
+    }
     
     // Обработка version-rolling (6-й параметр)
     uint32_t version_bits = 0;
@@ -1116,7 +1207,11 @@ class StratumSession : public std::enable_shared_from_this<StratumSession> {
 
     if (state_.version_rolling) {
         if (params.size() > 5 && params[5].is_string()) {
-            std::string vb_hex = params[5].get<std::string>();
+            std::string vb_hex = to_lower_hex(params[5].get<std::string>());
+            if (vb_hex.size() != 8 || !is_hex_string(vb_hex)) {
+              build_submit_error(request, "version_bits имеет неверный hex-формат");
+              return;
+            }
             try {
                 version_bits = std::stoul(vb_hex, nullptr, 16);
                 has_version_bits = true;
@@ -1129,13 +1224,11 @@ class StratumSession : public std::enable_shared_from_this<StratumSession> {
 
     auto job = job_manager_.current_job();
     if (!job) {
-      json response = {{"id", request["id"]}, {"result", false}, {"error", "Нет актуальной работы"}};
-      send_json(response);
+      build_submit_error(request, "Нет актуальной работы");
       return;
     }
     if (job->job_id != job_id) {
-      json response = {{"id", request["id"]}, {"result", false}, {"error", "Неактуальная работа"}};
-      send_json(response);
+      build_submit_error(request, "Неактуальная работа");
       return;
     }
 
@@ -1151,12 +1244,7 @@ class StratumSession : public std::enable_shared_from_this<StratumSession> {
         // job->version - это hex string (little endian encoded)
         // Нам нужно сначала получить uint32 из job->version
         try {
-            std::vector<uint8_t> ver_bytes = hex_to_bytes(job->version); // "02000000" -> {0x02, 0x00, 0x00, 0x00}
-            // Декодируем Little Endian в uint32
-            uint32_t config_version = 0;
-            if (ver_bytes.size() == 4) {
-                 config_version = ver_bytes[0] | (ver_bytes[1] << 8) | (ver_bytes[2] << 16) | (ver_bytes[3] << 24);
-            }
+            uint32_t config_version = decode_little_endian(job->version);
             
             uint32_t mask = state_.version_rolling_mask;
             uint32_t final_ver_int = (config_version & ~mask) | (version_bits & mask);
@@ -1178,7 +1266,8 @@ class StratumSession : public std::enable_shared_from_this<StratumSession> {
     // Проверка AuxPow массива. Индекс зависит от наличия version_bits
     if (params.size() > aux_param_index && params[aux_param_index].is_array()) {
       for (const auto &item : params[aux_param_index]) {
-        if (!item.contains("name") || !item.contains("auxpow")) {
+        if (!item.is_object() || !item.contains("name") || !item.contains("auxpow") ||
+            !item["name"].is_string() || !item["auxpow"].is_string()) {
           continue;
         }
         std::string chain_id = item["name"].get<std::string>();
