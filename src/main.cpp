@@ -9,6 +9,7 @@
 #include <csignal>
 #include <cctype>
 #include <cstdint>
+#include <deque>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -90,7 +91,13 @@ struct MinerSessionState {
   uint32_t difficulty = 1;
   bool subscribed = false;
   bool authorized = false;
+  bool version_rolling = false;
+  uint32_t version_rolling_mask = 0;
 };
+
+// ... (пропускаем глобальные переменные и функции до StartumSession)
+
+
 
 std::atomic<bool> g_running{true};
 std::atomic<uint64_t> g_shares_accepted{0};
@@ -334,43 +341,64 @@ Bech32DecodeResult bech32_decode(const std::string &address) {
 }
 
 std::string script_from_address(const std::string &address) {
-  if (address.rfind("bc1", 0) == 0 || address.rfind("tb1", 0) == 0 || address.rfind("bcrt1", 0) == 0) {
-    Bech32DecodeResult decoded = bech32_decode(address);
-    if (decoded.data.empty()) {
-      throw std::runtime_error("Bech32 без версии witness.");
+  try {
+    if (address.rfind("0x", 0) == 0) {
+      return address.substr(2); // RSK/Hex
     }
-    uint8_t version = decoded.data[0];
-    std::vector<uint8_t> program = convert_bits(
-        std::vector<uint8_t>(decoded.data.begin() + 1, decoded.data.end()), 5, 8, false);
-    if (version > 16) {
-      throw std::runtime_error("Неверная версия witness.");
+    if (address.rfind("bc1", 0) == 0 || address.rfind("tb1", 0) == 0 || address.rfind("bcrt1", 0) == 0 || address.rfind("sys1", 0) == 0) {
+      Bech32DecodeResult decoded = bech32_decode(address);
+      if (decoded.data.empty()) {
+        throw std::runtime_error("Bech32 без версии witness.");
+      }
+      uint8_t version = decoded.data[0];
+      std::vector<uint8_t> program = convert_bits(
+          std::vector<uint8_t>(decoded.data.begin() + 1, decoded.data.end()), 5, 8, false);
+      if (version > 16) {
+        throw std::runtime_error("Неверная версия witness.");
+      }
+      std::vector<uint8_t> script;
+      script.push_back(version == 0 ? 0x00 : static_cast<uint8_t>(0x50 + version));
+      script.push_back(static_cast<uint8_t>(program.size()));
+      script.insert(script.end(), program.begin(), program.end());
+      return bytes_to_hex(script);
     }
-    std::vector<uint8_t> script;
-    script.push_back(version == 0 ? 0x00 : static_cast<uint8_t>(0x50 + version));
-    script.push_back(static_cast<uint8_t>(program.size()));
-    script.insert(script.end(), program.begin(), program.end());
-    return bytes_to_hex(script);
+    std::vector<uint8_t> payload = base58check_decode(address);
+    if (payload.size() != 21) {
+      throw std::runtime_error("Неверная длина Base58Check адреса.");
+    }
+    uint8_t version = payload[0];
+    std::vector<uint8_t> hash(payload.begin() + 1, payload.end());
+    if (version == 0x00 || version == 0x6f) { // P2PKH mainnet/testnet
+      std::vector<uint8_t> script = {0x76, 0xa9, 0x14};
+      script.insert(script.end(), hash.begin(), hash.end());
+      script.push_back(0x88);
+      script.push_back(0xac);
+      return bytes_to_hex(script);
+    }
+    if (version == 0x05 || version == 0xc4) { // P2SH mainnet/testnet
+      std::vector<uint8_t> script = {0xa9, 0x14};
+      script.insert(script.end(), hash.begin(), hash.end());
+      script.push_back(0x87);
+      return bytes_to_hex(script);
+    }
+    if (version == 0x34) { // Namecoin P2PKH (N...)
+      std::vector<uint8_t> script = {0x76, 0xa9, 0x14};
+      script.insert(script.end(), hash.begin(), hash.end());
+      script.push_back(0x88);
+      script.push_back(0xac);
+      return bytes_to_hex(script);
+    }
+    if (version == 0x21) { // Elastos P2PKH (E...)
+      std::vector<uint8_t> script = {0x76, 0xa9, 0x14};
+      script.insert(script.end(), hash.begin(), hash.end());
+      script.push_back(0x88);
+      script.push_back(0xac);
+      return bytes_to_hex(script);
+    }
+    throw std::runtime_error("Неизвестная версия адреса: " + std::to_string(version));
+  } catch (const std::exception &ex) {
+    throw std::runtime_error(std::string("Ошибка адреса '") + address + "': " + ex.what());
   }
-  std::vector<uint8_t> payload = base58check_decode(address);
-  if (payload.size() != 21) {
-    throw std::runtime_error("Неверная длина Base58Check адреса.");
-  }
-  uint8_t version = payload[0];
-  std::vector<uint8_t> hash(payload.begin() + 1, payload.end());
-  if (version == 0x00 || version == 0x6f) { // P2PKH mainnet/testnet
-    std::vector<uint8_t> script = {0x76, 0xa9, 0x14};
-    script.insert(script.end(), hash.begin(), hash.end());
-    script.push_back(0x88);
-    script.push_back(0xac);
-    return bytes_to_hex(script);
-  }
-  if (version == 0x05 || version == 0xc4) { // P2SH mainnet/testnet
-    std::vector<uint8_t> script = {0xa9, 0x14};
-    script.insert(script.end(), hash.begin(), hash.end());
-    script.push_back(0x87);
-    return bytes_to_hex(script);
-  }
-  throw std::runtime_error("Неизвестная версия адреса Base58.");
 }
 
 std::string random_hex(size_t bytes) {
@@ -413,6 +441,16 @@ std::string encode_little_endian(uint64_t value, size_t bytes) {
     out[i] = static_cast<uint8_t>((value >> (8 * i)) & 0xff);
   }
   return bytes_to_hex(out);
+
+}
+
+uint32_t decode_little_endian(const std::string &hex) {
+  auto bytes = hex_to_bytes(hex);
+  uint32_t res = 0;
+  for (size_t i = 0; i < bytes.size() && i < 4; ++i) {
+    res |= (static_cast<uint32_t>(bytes[i]) << (i * 8));
+  }
+  return res;
 }
 
 std::string hex_reverse(const std::string &hex) {
@@ -879,22 +917,50 @@ class StratumSession : public std::enable_shared_from_this<StratumSession> {
       std::istream is(&buffer_);
       std::string line;
       std::getline(is, line);
+      // Удаляем возможный \r в конце (некоторые майнеры отправляют CRLF)
+      if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+      }
       if (!line.empty()) {
+        log_line("Получено от майнера: " + line);
         handle_message(line);
       }
       do_read();
     });
   }
 
-  void send_json(const json &message) {
-    auto serialized = message.dump() + "\n";
+  // Добавляем сообщение в очередь и запускаем отправку если нужно
+  void queue_send(const std::string &data) {
     auto self = shared_from_this();
-    boost::asio::async_write(socket_, boost::asio::buffer(serialized),
-                             [self](boost::system::error_code ec, std::size_t) {
+    bool write_in_progress = !write_queue_.empty();
+    write_queue_.push_back(data);
+    if (!write_in_progress) {
+      do_write();
+    }
+  }
+
+  // Отправляем следующее сообщение из очереди
+  void do_write() {
+    if (write_queue_.empty()) {
+      return;
+    }
+    auto self = shared_from_this();
+    boost::asio::async_write(socket_, boost::asio::buffer(write_queue_.front()),
+                             [this, self](boost::system::error_code ec, std::size_t) {
       if (ec) {
         log_line("Ошибка отправки: " + ec.message());
+        write_queue_.clear();
+        return;
       }
+      write_queue_.pop_front();
+      do_write();  // Отправляем следующее сообщение
     });
+  }
+
+  void send_json(const json &message) {
+    auto serialized = message.dump() + "\n";
+    log_line("Отправляем майнеру: " + serialized);
+    queue_send(serialized);
   }
 
   // Обработка входящего JSON-RPC сообщения от майнера.
@@ -908,7 +974,9 @@ class StratumSession : public std::enable_shared_from_this<StratumSession> {
     }
 
     std::string method = request.value("method", "");
-    if (method == "mining.subscribe") {
+    if (method == "mining.configure") {
+      handle_configure(request);
+    } else if (method == "mining.subscribe") {
       handle_subscribe(request);
     } else if (method == "mining.authorize") {
       handle_authorize(request);
@@ -918,10 +986,58 @@ class StratumSession : public std::enable_shared_from_this<StratumSession> {
       handle_get_merged_mining_coins(request);
     } else if (method == "mining.get_merged_mining_chains") {
       handle_get_merged_mining_chains(request);
+    } else if (method == "mining.suggest_difficulty") {
+      // Игнорируем suggest_difficulty, но не возвращаем ошибку
+      log_line("Майнер предлагает сложность: " + request["params"].dump());
+    } else if (method == "mining.extranonce.subscribe") {
+      // Поддержка extranonce subscribe
+      json response = {{"id", request["id"]}, {"result", true}, {"error", nullptr}};
+      send_json(response);
     } else {
-      json response = {{"id", request["id"]}, {"result", nullptr}, {"error", "Неизвестный метод"}};
+      log_line("Неизвестный метод от майнера: [" + method + "] (длина: " + std::to_string(method.length()) + ")");
+      json response = {{"id", request["id"]}, {"result", nullptr}, {"error", json::array({20, "Unknown method", nullptr})}};
       send_json(response);
     }
+  }
+
+
+  // mining.configure: обработка расширений протокола Stratum (BIP310)
+  void handle_configure(const json &request) {
+    json result = json::object();
+    json params = request["params"];
+    
+    if (params.size() >= 2 && params[0].is_array() && params[1].is_object()) {
+       auto extensions = params[0];
+       auto options = params[1];
+       
+       for (const auto& ext : extensions) {
+         if (ext == "version-rolling") {
+           // Принимаем version-rolling
+           state_.version_rolling = true;
+           std::string mask_hex = "ffffffff"; // По умолчанию разрешаем всё
+           if (options.contains("version-rolling.mask")) {
+             mask_hex = options["version-rolling.mask"].get<std::string>();
+           }
+           // Парсим маску
+           try {
+             state_.version_rolling_mask = std::stoul(mask_hex, nullptr, 16);
+           } catch (...) {
+             state_.version_rolling_mask = 0xffffffff;
+           }
+           
+           result["version-rolling"] = true;
+           result["version-rolling.mask"] = mask_hex; 
+           log_line("Включен version-rolling для майнера. Маска: " + mask_hex);
+         } else if (ext == "minimum-difficulty") {
+             result["minimum-difficulty"] = false;
+         } else if (ext == "subscribe-extranonce") {
+             result["subscribe-extranonce"] = true;
+         }
+       }
+    }
+    
+    json response = {{"id", request["id"]}, {"result", result}, {"error", nullptr}};
+    send_json(response);
   }
 
   // mining.subscribe: выдаём extranonce и настройки.
@@ -929,9 +1045,15 @@ class StratumSession : public std::enable_shared_from_this<StratumSession> {
     state_.extranonce1 = job_manager_.extranonce1();
     state_.subscribed = true;
 
+    // Правильный порядок: сначала set_difficulty, потом notify
+    json subscriptions = json::array({
+        json::array({"mining.set_difficulty", "1"}),
+        json::array({"mining.notify", "1"})
+    });
+    
     json response = {
         {"id", request["id"]},
-        {"result", json::array({json::array({json::array({"mining.notify", "1"}), json::array({"mining.set_difficulty", "1"})}), state_.extranonce1, config_.extranonce2_size})},
+        {"result", json::array({subscriptions, state_.extranonce1, static_cast<int>(config_.extranonce2_size)})},
         {"error", nullptr}};
     send_json(response);
 
@@ -985,6 +1107,25 @@ class StratumSession : public std::enable_shared_from_this<StratumSession> {
     std::string extranonce2 = params[2].get<std::string>();
     std::string ntime = params[3].get<std::string>();
     std::string nonce = params[4].get<std::string>();
+    
+    // Обработка version-rolling (6-й параметр)
+    uint32_t version_bits = 0;
+    bool has_version_bits = false;
+    
+    size_t aux_param_index = 5; // Индекс, где искать auxpow данные (по умолчанию 5)
+
+    if (state_.version_rolling) {
+        if (params.size() > 5 && params[5].is_string()) {
+            std::string vb_hex = params[5].get<std::string>();
+            try {
+                version_bits = std::stoul(vb_hex, nullptr, 16);
+                has_version_bits = true;
+            } catch (...) {
+                log_line("Ошибка парсинга version_bits: " + vb_hex);
+            }
+            aux_param_index = 6; // Если есть version_bits, auxpow смещается на 6
+        }
+    }
 
     auto job = job_manager_.current_job();
     if (!job) {
@@ -1003,15 +1144,40 @@ class StratumSession : public std::enable_shared_from_this<StratumSession> {
     std::string coinbase_hash_hex = bytes_to_hex_rev(coinbase_hash);
     std::string merkle_root = calculate_merkle_root(coinbase_hash_hex, job->merkle_branches);
 
-    std::string header_hex = job->version + job->prevhash + merkle_root + ntime + job->nbits + nonce;
+    // Вычисляем версию блока
+    std::string final_version_hex = job->version;
+    if (has_version_bits) {
+        // Реконструкция версии: (job_version & ~mask) | (version_bits & mask)
+        // job->version - это hex string (little endian encoded)
+        // Нам нужно сначала получить uint32 из job->version
+        try {
+            std::vector<uint8_t> ver_bytes = hex_to_bytes(job->version); // "02000000" -> {0x02, 0x00, 0x00, 0x00}
+            // Декодируем Little Endian в uint32
+            uint32_t config_version = 0;
+            if (ver_bytes.size() == 4) {
+                 config_version = ver_bytes[0] | (ver_bytes[1] << 8) | (ver_bytes[2] << 16) | (ver_bytes[3] << 24);
+            }
+            
+            uint32_t mask = state_.version_rolling_mask;
+            uint32_t final_ver_int = (config_version & ~mask) | (version_bits & mask);
+            
+            final_version_hex = encode_little_endian(final_ver_int, 4);
+            
+        } catch (const std::exception& e) {
+            log_line("Ошибка расчета rolling version: " + std::string(e.what()));
+        }
+    }
+
+    std::string header_hex = final_version_hex + job->prevhash + merkle_root + ntime + job->nbits + nonce;
     auto header_hash = sha256d(hex_to_bytes(header_hex));
     std::string header_hash_hex = bytes_to_hex_rev(header_hash);
 
     std::string share_target = target_from_difficulty(state_.difficulty);
     bool accepted = hash_meets_target(header_hash_hex, share_target);
 
-    if (params.size() > 5 && params[5].is_array()) {
-      for (const auto &item : params[5]) {
+    // Проверка AuxPow массива. Индекс зависит от наличия version_bits
+    if (params.size() > aux_param_index && params[aux_param_index].is_array()) {
+      for (const auto &item : params[aux_param_index]) {
         if (!item.contains("name") || !item.contains("auxpow")) {
           continue;
         }
@@ -1032,10 +1198,11 @@ class StratumSession : public std::enable_shared_from_this<StratumSession> {
 
     if (accepted && hash_meets_target(header_hash_hex, job->target)) {
       try {
+        // Важно: отправляем блок с правильной (измененной) версией!
         std::string block_hex = build_block_hex(header_hex, coinbase_tx, job->transactions_hex);
         rpc_submit_block(block_hex);
         g_blocks_found.fetch_add(1);
-        log_line("Найден блок! Отправлен в сеть.");
+        log_line("Найден блок! Отправлен в сеть. Hash: " + header_hash_hex);
       } catch (const std::exception &ex) {
         log_line(std::string("Ошибка submitblock: ") + ex.what());
       }
@@ -1097,6 +1264,7 @@ class StratumSession : public std::enable_shared_from_this<StratumSession> {
 
   tcp::socket socket_;
   boost::asio::streambuf buffer_;
+  std::deque<std::string> write_queue_;  // Очередь сообщений для последовательной отправки
   Config config_;
   JobManager &job_manager_;
   MinerSessionState state_;
@@ -1166,6 +1334,8 @@ Config load_config(const std::string &path) {
   }
   if (data.contains("merged_mining_chains")) {
     for (const auto &entry : data.at("merged_mining_chains")) {
+      if (!entry.value("enabled", true)) continue;
+
       AuxChainConfig chain;
       chain.name = entry.at("name").get<std::string>();
       chain.ticker = entry.at("ticker").get<std::string>();
