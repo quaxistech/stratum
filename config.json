@@ -1,0 +1,78 @@
+{
+  "rpc_url": "http://127.0.0.1:8332",
+  "rpc_user": "bitcoinrpc",
+  "rpc_password": "secret",
+  "zmq_block_host": "127.0.0.1",
+  "zmq_block_port": 28332,
+  "bind_address": "0.0.0.0",
+  "port": 3333,
+  "poll_interval_seconds": 5,
+  "default_difficulty": 321024,
+  "extranonce1_size": 4,
+  "extranonce2_size": 8,
+  "enable_auxpow": true,
+  "payout_address": "00146463ee37bbf4826990bc88774e6e4fb43a6271d4",
+  "protocol_version": 1073733632,
+ 
+  "merged_mining_chains": [
+    {
+      "name": "Fractal Bitcoin",
+      "ticker": "FB",
+      "rpc_url": "http://127.0.0.1:18332",
+      "rpc_user": "fractaluser",
+      "rpc_password": "fractalpass",
+      "payout_address": "bc1q50hz9ncrvs8dt5kag0jnrgh49nep2cad8g77yv",
+      "enabled": false,
+      "wallet": "pool_wallet_fractal"
+    },
+    {
+      "name": "Rootstock",
+      "ticker": "RSK",
+      "rpc_url": "http://127.0.0.1:4444",
+      "rpc_user": "rskrpc",
+      "rpc_password": "rskpass",
+      "payout_address": "0xaF22f5Dd2d88005753abda4D543dBf7CB5d7c872",
+      "enabled": false,
+      "wallet": null
+    },
+    {
+      "name": "Syscoin",
+      "ticker": "SYS",
+      "rpc_url": "http://127.0.0.1:8370",
+      "rpc_user": "sysuser",
+      "rpc_password": "syspass",
+      "payout_address": "sys1qtekej0kyf9pl0fjf668xyyzhdhpe5vle7u8ja8",
+      "enabled": false,
+      "wallet": "pool_wallet_syscoin"
+    },
+    {
+      "name": "Namecoin",
+      "ticker": "NMC",
+      "rpc_url": "http://127.0.0.1:8336",
+      "rpc_user": "nmcuser",
+      "rpc_password": "nmcpass",
+      "payout_address": "N4gzmQfNjEkfVNMy5p9xxV8nj7hqM3tEhc",
+      "enabled": false,
+      "wallet": null
+    },
+    {
+      "name": "Elastos",
+      "ticker": "ELA",
+      "rpc_url": "http://127.0.0.1:20336",
+      "rpc_user": "elarpc",
+      "rpc_password": "elapass",
+      "payout_address": "ESGZC9A2TSvwnQRjuBYS1JuVopChKGRy4h",
+      "enabled": false,
+      "wallet_address": "ESGZC9A2TSvwnQRjuBYS1JuVopChKGRy4h"
+    }
+  ],
+  "pool_config": {
+    "max_workers": 1000,
+    "difficulty_multiplier": 1.5,
+    "share_target_time": 10,
+    "block_reward_split": {
+      "miner": 98.5,
+      "pool": 1.5
+    }
+  }
+}
